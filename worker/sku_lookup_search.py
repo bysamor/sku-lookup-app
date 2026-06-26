@@ -295,6 +295,62 @@ def bilingual_zh_hk(text: Optional[str]) -> Optional[str]:
     return f"EN: {text}\nZH-HK: {translated}"
 
 
+def llm_extract_missing_fields(page_text: str, sku: str, missing: List[str]) -> Dict[str, Optional[str]]:
+    """關鍵字比對抓不到的欄位，改用 LLM 直接讀網頁文字抽取（順便雙語輸出）。
+
+    比關鍵字比對更能處理：措辭不同（例如 "How to Use" vs "Directions"）、
+    表格/分頁籤排版、欄位順序不固定等情況。網頁是 JS 動態渲染的話依然抓不到
+    （因為我們只抓靜態 HTML），這種狀況不在這個函式的修正範圍內。
+    """
+    if not missing or not _TRANSLATE_API_KEY:
+        return {}
+
+    field_names = {
+        "benefits": "功效/好處 (benefits)",
+        "ingredients": "成分 (ingredients)",
+        "direction": "使用方法 (directions / how to use)",
+        "country": "原產地 (country of origin)",
+    }
+    wanted = {k: field_names[k] for k in missing if k in field_names}
+    if not wanted:
+        return {}
+
+    try:
+        resp = requests.post(
+            f"{_TRANSLATE_API_BASE}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {_TRANSLATE_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": _TRANSLATE_MODEL,
+                "temperature": 0,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是電商產品頁面資料擷取助手。使用者會給你一個產品網頁的純文字內容和 SKU 編號，"
+                            "請從文字中找出以下欄位的內容（如果有的話）：" + "、".join(wanted.values()) + "。"
+                            "找到的欄位請輸出雙語格式：如果原文是英文，輸出 'EN: <原文>\\nZH-HK: <繁體中文翻譯，香港用語>'；"
+                            "如果原文已經是中文，直接輸出原文。找不到的欄位請填 null。"
+                            "只輸出 JSON 物件，key 為 " + ", ".join(f'"{k}"' for k in wanted) + "，不要任何其他文字。"
+                        ),
+                    },
+                    {"role": "user", "content": f"SKU: {sku}\n\n網頁文字內容：\n{page_text[:8000]}"},
+                ],
+            },
+            timeout=REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+        return {k: parsed.get(k) for k in wanted if parsed.get(k)}
+    except Exception:
+        # LLM 抽取失敗時不阻斷整個流程，缺的欄位維持空白
+        return {}
+
+
 def parse_product_page(url: str, sku: str, html: Optional[str] = None) -> Dict[str, Optional[str]]:
     if html is None:
         html = fetch_html(url)
@@ -334,13 +390,21 @@ def parse_product_page(url: str, sku: str, html: Optional[str] = None) -> Dict[s
     direction = direction or extract_labeled_block(page_text, ["Directions", "Direction", "How to use", "Feeding Guide", "使用方法", "食用方法"])
     country = country or extract_labeled_block(page_text, ["Country", "Country of Origin", "Brand Country", "原產地"])
 
+    fields = {"benefits": benefits, "ingredients": ingredients, "direction": direction, "country": country}
+    bilingual_fields = {k: bilingual_zh_hk(v) for k, v in fields.items()}
+
+    still_missing = [k for k, v in bilingual_fields.items() if not v]
+    if still_missing:
+        llm_filled = llm_extract_missing_fields(page_text, sku, still_missing)
+        bilingual_fields.update(llm_filled)
+
     return {
         "name": translate_to_zh_hk(name),
         "image": image,
-        "benefits": bilingual_zh_hk(benefits),
-        "ingredients": bilingual_zh_hk(ingredients),
-        "direction": bilingual_zh_hk(direction),
-        "country": bilingual_zh_hk(country),
+        "benefits": bilingual_fields["benefits"],
+        "ingredients": bilingual_fields["ingredients"],
+        "direction": bilingual_fields["direction"],
+        "country": bilingual_fields["country"],
         "html": html,
     }
 
