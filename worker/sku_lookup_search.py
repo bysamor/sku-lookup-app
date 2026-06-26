@@ -409,6 +409,45 @@ def parse_product_page(url: str, sku: str, html: Optional[str] = None) -> Dict[s
     }
 
 
+# 最佳結果頁缺欄位時，最多再多看幾個候選頁來補（避免每個 SKU 都把全部候選抓一輪，控制時間/成本）
+MAX_EXTRA_CANDIDATES_FOR_MERGE = 3
+MERGE_FIELDS = ["benefits", "ingredients", "direction", "country"]
+
+
+def merge_missing_fields_from_candidates(
+    primary: Dict[str, Optional[str]],
+    candidates: List[CandidatePage],
+    exclude_url: str,
+    sku: str,
+    max_extra: int = MAX_EXTRA_CANDIDATES_FOR_MERGE,
+) -> Dict[str, Optional[str]]:
+    """產品名稱/圖片/網址都鎖定最佳結果頁，但功效/成分/使用方法/原產地這幾個
+    內容欄位，最佳結果頁沒有的話，依分數順序去看其他候選頁有沒有，哪個候選頁
+    有資料就補上，全部候選頁都沒有才真的留空。"""
+    missing = [f for f in MERGE_FIELDS if not primary.get(f)]
+    if not missing:
+        return primary
+
+    tried = 0
+    for c in candidates:
+        if tried >= max_extra or not missing:
+            break
+        if c.url == exclude_url:
+            continue
+        tried += 1
+        try:
+            extra = parse_product_page(c.url, sku)
+        except Exception:
+            continue
+        for field in list(missing):
+            if extra.get(field):
+                primary[field] = extra[field]
+                missing.remove(field)
+        time.sleep(0.5)
+
+    return primary
+
+
 def choose_best_candidate(candidates: List[CandidatePage], sku: str) -> tuple[Optional[CandidatePage], Optional[str]]:
     best: Optional[CandidatePage] = None
     best_html: Optional[str] = None
@@ -458,6 +497,7 @@ def lookup_sku(sku: str, search_provider: SearchProvider) -> ProductResult:
 
     try:
         parsed = parse_product_page(best.url, sku, html=best_html)
+        parsed = merge_missing_fields_from_candidates(parsed, ranked, exclude_url=best.url, sku=sku)
         if best.score >= MIN_CONFIDENT_SCORE and best.matched_sku:
             status = "已找到"
         else:
