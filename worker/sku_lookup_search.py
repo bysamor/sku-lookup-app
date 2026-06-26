@@ -25,6 +25,13 @@ USER_AGENT = "Mozilla/5.0 (compatible; SKU-Search-App/1.0)"
 HEADERS = {"User-Agent": USER_AGENT}
 REQUEST_TIMEOUT = 25
 
+# Firecrawl：用真實瀏覽器渲染頁面再回傳乾淨文字，能抓到 requests 抓不到的
+# JS 動態載入內容（例如分頁籤裡的 Directions/Benefits）。沒設定 key 則跳過，
+# 退回原本只用 requests 抓靜態 HTML 的行為。
+FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY", "").strip()
+FIRECRAWL_API_BASE = os.getenv("FIRECRAWL_API_BASE", "https://api.firecrawl.dev/v1").strip()
+FIRECRAWL_TIMEOUT = 30
+
 # 候選分數低於此門檻 -> 視為「待人工確認」而非「已找到」
 MIN_CONFIDENT_SCORE = 50.0
 
@@ -111,6 +118,29 @@ def fetch_html(url: str) -> str:
     r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     return r.text
+
+
+def fetch_rendered_text(url: str) -> Optional[str]:
+    """用 Firecrawl 渲染頁面後回傳乾淨的 markdown 文字。沒設 FIRECRAWL_API_KEY
+    或呼叫失敗時回 None，呼叫端應該退回用 requests 抓到的靜態文字。"""
+    if not FIRECRAWL_API_KEY:
+        return None
+    try:
+        resp = requests.post(
+            f"{FIRECRAWL_API_BASE}/scrape",
+            headers={
+                "Authorization": f"Bearer {FIRECRAWL_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={"url": url, "formats": ["markdown"], "onlyMainContent": True},
+            timeout=FIRECRAWL_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        markdown = (data.get("data") or {}).get("markdown")
+        return markdown or None
+    except Exception:
+        return None
 
 
 def clean_text(text: str) -> str:
@@ -337,7 +367,7 @@ def llm_extract_missing_fields(page_text: str, sku: str, missing: List[str]) -> 
                             "只輸出 JSON 物件，key 為 " + ", ".join(f'"{k}"' for k in wanted) + "，不要任何其他文字。"
                         ),
                     },
-                    {"role": "user", "content": f"SKU: {sku}\n\n網頁文字內容：\n{page_text[:8000]}"},
+                    {"role": "user", "content": f"SKU: {sku}\n\n網頁文字內容：\n{page_text[:16000]}"},
                 ],
             },
             timeout=REQUEST_TIMEOUT,
@@ -345,7 +375,12 @@ def llm_extract_missing_fields(page_text: str, sku: str, missing: List[str]) -> 
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"]
         parsed = json.loads(content)
-        return {k: parsed.get(k) for k in wanted if parsed.get(k)}
+
+        def is_real_value(v: Any) -> bool:
+            # LLM 有時會把 JSON null 誤寫成字串 "null"/"none"，要當作沒找到
+            return bool(v) and isinstance(v, str) and v.strip().lower() not in ("null", "none", "n/a")
+
+        return {k: parsed.get(k) for k in wanted if is_real_value(parsed.get(k))}
     except Exception:
         # LLM 抽取失敗時不阻斷整個流程，缺的欄位維持空白
         return {}
@@ -356,6 +391,15 @@ def parse_product_page(url: str, sku: str, html: Optional[str] = None) -> Dict[s
         html = fetch_html(url)
     soup = BeautifulSoup(html, "html.parser")
     page_text = soup.get_text("\n", strip=True)
+
+    # JSON-LD/meta image 還是讀靜態 HTML（不需要渲染）。關鍵字比對/LLM 抽取用的
+    # page_text 疊加 Firecrawl 渲染後的文字（不是取代）——Firecrawl 的
+    # onlyMainContent 有時會把含有用資料的區塊過濾掉，疊加才不會比純 requests
+    # 漏資訊，同時補上 JS 動態載入、靜態 HTML 抓不到的內容（例如分頁籤裡的
+    # Directions/Benefits）。
+    rendered_text = fetch_rendered_text(url)
+    if rendered_text:
+        page_text = page_text + "\n\n" + rendered_text
 
     name = None
     image = None
