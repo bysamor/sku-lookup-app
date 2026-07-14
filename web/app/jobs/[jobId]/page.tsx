@@ -151,6 +151,7 @@ export default function JobPage() {
         </div>
         <a
           href={`/api/lookup-jobs/${jobId}/export`}
+          download={`sku-lookup-${jobId}.csv`}
           className="inline-flex items-center rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:opacity-90"
         >
           匯出 CSV
