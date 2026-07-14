@@ -432,44 +432,34 @@ interface Gs1Result {
 }
 
 async function lookupGs1(sku: string): Promise<Gs1Result> {
-  // Pad to 14-digit GTIN if needed
-  const gtin = sku.replace(/\D/g, "").padStart(14, "0");
+  const gs1Url = `https://www.gs1.org/services/verified-by-gs1?gtin=${sku}`;
   try {
-    // GS1 Verified by GS1 public API
-    const res = await fetch(
-      `https://www.gs1.org/services/verified-by-gs1/results?gtin=${gtin}&lang=en`,
-      {
-        headers: { Accept: "application/json", "User-Agent": "Mozilla/5.0" },
-        signal: AbortSignal.timeout(15000),
+    // Scrape the GS1 page with Firecrawl (it's a JS-rendered page)
+    const markdown = await fetchFirecrawl(gs1Url);
+    if (!markdown) return {};
+
+    // Extract fields from GS1 markdown
+    const extract = (labels: string[]): string | undefined => {
+      for (const label of labels) {
+        const re = new RegExp(
+          `${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*[|:\\n]+\\s*([^\\n|]{2,})`,
+          "i"
+        );
+        const m = markdown.match(re);
+        if (m?.[1]?.trim() && !["unknown", "n/a", "-"].includes(m[1].trim().toLowerCase())) {
+          return m[1].trim();
+        }
       }
-    );
-    if (!res.ok) return {};
-    const data = await res.json();
-    const product = data?.product || data?.products?.[0] || data;
+      return undefined;
+    };
 
-    // Extract from typical GS1 response shapes
-    const productName =
-      product?.productDescription?.find((d: { languageCode: string; value: string }) => d.languageCode === "en")?.value ||
-      product?.productDescription?.[0]?.value ||
-      product?.productName ||
-      product?.gpcCategoryDefinition ||
-      null;
+    const productName = extract(["Product description", "Product name"]);
+    const brandName = extract(["Brand name", "Brand"]);
+    const countryOfSale = extract(["Country of sale", "Country"]);
 
-    const brandName =
-      product?.brandName?.find((b: { languageCode: string; value: string }) => b.languageCode === "en")?.value ||
-      product?.brandName?.[0]?.value ||
-      product?.brand ||
-      null;
-
-    const imageUrl =
-      product?.productImageUrl?.[0]?.value ||
-      product?.productImageUrl ||
-      null;
-
-    const countryOfSale =
-      product?.countryOfSaleCode?.[0] ||
-      product?.countryOfSale ||
-      null;
+    // GS1 rarely has images, but try extracting image URL from markdown
+    const imgMatch = markdown.match(/!\[.*?\]\((https?:\/\/[^\s)]+)\)/);
+    const imageUrl = imgMatch?.[1];
 
     return {
       productName: productName || undefined,
