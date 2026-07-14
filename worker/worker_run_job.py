@@ -17,7 +17,7 @@ from db_supabase import (
     mark_candidate_selected,
     mark_job_progress,
 )
-from sku_lookup_search import SerpApiSearchProvider, lookup_sku
+from sku_lookup_search import SerpApiSearchProvider, lookup_sku, parse_product_page
 
 
 def run_lookup_job(job_id: str) -> None:
@@ -74,6 +74,29 @@ def run_lookup_job(job_id: str) -> None:
         time.sleep(1.0)
 
     mark_job_progress(job_id, processed, status="done")
+
+
+def re_extract_item(item_id: str, url: str, sku: str, candidate_id: str) -> None:
+    """使用者手動選定候選來源後，重新從該 URL 抓取產品欄位並更新 item。"""
+    try:
+        parsed = parse_product_page(url, sku)
+        update_lookup_item(
+            item_id,
+            {
+                "product_name": parsed.get("name") or None,
+                "product_image": parsed.get("image") or None,
+                "benefits": parsed.get("benefits") or None,
+                "ingredients": parsed.get("ingredients") or None,
+                "direction": parsed.get("direction") or None,
+                "country": parsed.get("country") or None,
+                "product_url": url,
+                "status": "needs_review",
+                "reviewed": True,
+            },
+        )
+        mark_candidate_selected(item_id, candidate_id)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[worker] re_extract_item failed item={item_id}: {exc}")
 
 
 if __name__ == "__main__":

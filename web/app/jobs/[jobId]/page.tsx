@@ -93,12 +93,18 @@ export default function JobPage() {
   }, [job, load]);
 
   async function selectCandidate(itemId: string, candidateId: string) {
-    await fetch(`/api/lookup-items/${itemId}/select-candidate`, {
+    const res = await fetch(`/api/lookup-items/${itemId}/select-candidate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ candidateId }),
     });
+    const data = await res.json();
     load();
+    // worker 在背景重新抓取候選頁內容，5 秒後再自動刷新一次
+    if (data?.reExtracting) {
+      setTimeout(load, 5000);
+      setTimeout(load, 12000);
+    }
   }
 
   async function saveItem(itemId: string, values: Partial<Item>) {

@@ -267,7 +267,12 @@ _TRANSLATE_MODEL = os.getenv("TRANSLATE_MODEL", "gpt-4o-mini").strip()
 
 
 def _looks_like_chinese(text: str) -> bool:
-    return bool(re.search(r"[一-鿿]", text))
+    # 只有當中文字佔所有字母類字元 50% 以上才視為中文，避免混有少量中文標題的英文內容跳過翻譯
+    chinese_chars = len(re.findall(r"[一-鿿]", text))
+    alpha_chars = len(re.findall(r"[A-Za-z一-鿿]", text))
+    if alpha_chars == 0:
+        return False
+    return chinese_chars / alpha_chars >= 0.5
 
 
 def translate_to_zh_hk(text: Optional[str]) -> Optional[str]:

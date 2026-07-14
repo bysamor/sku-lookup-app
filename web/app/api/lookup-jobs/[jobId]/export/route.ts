@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseServer } from "@/app/lib/supabaseServer";
 
+export const dynamic = "force-dynamic";
+
 const HEADERS = [
   "SKU編號",
   "產品名稱",
