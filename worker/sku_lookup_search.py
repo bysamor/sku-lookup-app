@@ -83,14 +83,18 @@ class SerpApiSearchProvider(SearchProvider):
     def __init__(self, api_key: str):
         self.api_key = api_key
 
-    def search(self, query: str, limit: int = 5) -> List[CandidatePage]:
+    def search(self, query: str, limit: int = 5, gl: str = "", hl: str = "") -> List[CandidatePage]:
         url = "https://serpapi.com/search.json"
-        params = {
+        params: Dict[str, Any] = {
             "engine": "google",
             "q": query,
             "num": limit,
             "api_key": self.api_key,
         }
+        if gl:
+            params["gl"] = gl  # 搜尋地區，例如 "kr"=韓國、"tw"=台灣、"hk"=香港
+        if hl:
+            params["hl"] = hl  # 介面語言，例如 "ko"=韓文、"zh-TW"=繁體中文
         r = requests.get(url, params=params, headers=HEADERS, timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
         data = r.json()
@@ -234,7 +238,12 @@ def score_candidate(candidate: CandidatePage, sku: str, html: str) -> float:
     if any(x in candidate.url.lower() for x in ["amazon", "facebook", "instagram", "youtube", "pinterest"]):
         score -= 30
 
-    if any(x in haystack.lower() for x in ["ingredient", "ingredients", "benefits", "directions", "country", "sku", "成分", "功效", "使用方法", "原產地"]):
+    if any(x in haystack.lower() for x in [
+        "ingredient", "ingredients", "benefits", "directions", "country", "sku",
+        "成分", "功效", "使用方法", "原產地",
+        "성분", "효능", "사용방법", "원산지",  # 韓文
+        "原料", "用法", "产地",               # 簡體中文
+    ]):
         score += 10
 
     return score
@@ -365,10 +374,10 @@ def llm_extract_missing_fields(page_text: str, sku: str, missing: List[str]) -> 
                     {
                         "role": "system",
                         "content": (
-                            "你是電商產品頁面資料擷取助手。使用者會給你一個產品網頁的純文字內容和 SKU 編號，"
+                            "你是電商產品頁面資料擷取助手。使用者會給你一個產品網頁的純文字內容（可能是英文、韓文、日文、中文或其他語言）和 SKU 編號，"
                             "請從文字中找出以下欄位的內容（如果有的話）：" + "、".join(wanted.values()) + "。"
-                            "找到的欄位請輸出雙語格式：如果原文是英文，輸出 'EN: <原文>\\nZH-HK: <繁體中文翻譯，香港用語>'；"
-                            "如果原文已經是中文，直接輸出原文。找不到的欄位請填 null。"
+                            "找到的欄位請輸出雙語格式：'EN: <英文原文或英文翻譯>\\nZH-HK: <繁體中文翻譯（香港用語）>'；"
+                            "如果原文已經是繁體中文，直接輸出原文。找不到的欄位請填 null。"
                             "只輸出 JSON 物件，key 為 " + ", ".join(f'"{k}"' for k in wanted) + "，不要任何其他文字。"
                         ),
                     },
@@ -434,10 +443,22 @@ def parse_product_page(url: str, sku: str, html: Optional[str] = None) -> Dict[s
     if not image:
         image = extract_meta_image(soup)
 
-    benefits = benefits or extract_labeled_block(page_text, ["Benefits", "好處", "功效", "特色", "特點"])
-    ingredients = ingredients or extract_labeled_block(page_text, ["Ingredients", "Main Ingredients", "成分"])
-    direction = direction or extract_labeled_block(page_text, ["Directions", "Direction", "How to use", "Feeding Guide", "使用方法", "食用方法"])
-    country = country or extract_labeled_block(page_text, ["Country", "Country of Origin", "Brand Country", "原產地"])
+    benefits = benefits or extract_labeled_block(page_text, [
+        "Benefits", "好處", "功效", "特色", "特點",
+        "효능", "특징", "제품특징",  # 韓文
+    ])
+    ingredients = ingredients or extract_labeled_block(page_text, [
+        "Ingredients", "Main Ingredients", "成分", "原料",
+        "성분", "주요성분", "원재료",  # 韓文
+    ])
+    direction = direction or extract_labeled_block(page_text, [
+        "Directions", "Direction", "How to use", "Feeding Guide", "使用方法", "食用方法", "用法",
+        "사용방법", "급여방법", "복용방법",  # 韓文
+    ])
+    country = country or extract_labeled_block(page_text, [
+        "Country", "Country of Origin", "Brand Country", "原產地", "产地",
+        "원산지", "제조국",  # 韓文
+    ])
 
     fields = {"benefits": benefits, "ingredients": ingredients, "direction": direction, "country": country}
     bilingual_fields = {k: bilingual_zh_hk(v) for k, v in fields.items()}
@@ -515,25 +536,76 @@ def choose_best_candidate(candidates: List[CandidatePage], sku: str) -> tuple[Op
     return best, best_html
 
 
+def _barcode_region(sku: str) -> str:
+    """根據 GS1 條碼前綴猜測產品原產地，用來決定優先搜尋哪個地區。"""
+    s = sku.strip()
+    if s.startswith("880"):
+        return "kr"   # 韓國
+    if s.startswith(("471", "489")):
+        return "tw"   # 台灣 / 香港
+    if s.startswith(("690", "691", "692", "693", "694", "695", "696", "697", "698", "699")):
+        return "cn"   # 中國
+    if s.startswith("45") or s.startswith("49"):
+        return "jp"   # 日本
+    return ""
+
+
 def lookup_sku(sku: str, search_provider: SearchProvider) -> ProductResult:
     sku = clean_text(sku)
 
     exclude_suffix = " ".join(f"-site:{d}" for d in EXCLUDE_DOMAINS)
+    region = _barcode_region(sku)
+
+    # 英文基本查詢（全球）
     base_queries = [sku, f'"{sku}" product', f'"{sku}" sku']
-    queries = [f"{q} {exclude_suffix}".strip() for q in base_queries] if exclude_suffix else base_queries
+
+    # 多語言額外查詢（依地區加入）
+    extra_queries: List[tuple[str, str, str]] = []  # (query, gl, hl)
+    if region == "kr":
+        extra_queries = [
+            (f'"{sku}" 제품', "kr", "ko"),
+            (f'"{sku}" 상품', "kr", "ko"),
+        ]
+    elif region in ("tw", "hk"):
+        extra_queries = [
+            (f'"{sku}" 產品', "tw", "zh-TW"),
+            (f'"{sku}" 商品', "hk", "zh-TW"),
+        ]
+    elif region == "cn":
+        extra_queries = [
+            (f'"{sku}" 产品', "cn", "zh-CN"),
+        ]
+    elif region == "jp":
+        extra_queries = [
+            (f'"{sku}" 製品', "jp", "ja"),
+        ]
+    else:
+        # 未知地區：補一組繁中 + 英文加強查詢
+        extra_queries = [
+            (f'"{sku}" 產品', "hk", "zh-TW"),
+        ]
 
     candidates: List[CandidatePage] = []
     seen = set()
 
-    for q in queries:
+    def _add_results(q: str, gl: str = "", hl: str = "") -> None:
+        full_q = f"{q} {exclude_suffix}".strip() if exclude_suffix else q
         try:
-            for c in search_provider.search(q, limit=5):
+            for c in search_provider.search(full_q, limit=5, gl=gl, hl=hl):
                 if c.url and c.url not in seen and not is_excluded_domain(c.url):
                     seen.add(c.url)
                     candidates.append(c)
             time.sleep(0.8)
         except Exception:
-            continue
+            pass
+
+    # 先跑英文全球查詢
+    for q in base_queries:
+        _add_results(q)
+
+    # 再跑地區語言查詢
+    for q, gl, hl in extra_queries:
+        _add_results(q, gl=gl, hl=hl)
 
     if not candidates:
         return ProductResult(sku_code=sku, status="未找到")
