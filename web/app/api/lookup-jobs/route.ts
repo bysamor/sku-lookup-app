@@ -38,19 +38,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: itemsError.message }, { status: 500 });
   }
 
-  const workerUrl = process.env.WORKER_BASE_URL;
-  if (workerUrl) {
-    try {
-      await fetch(`${workerUrl}/run-job`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ job_id: job.id }),
-      });
-    } catch {
-      // worker 暫時連不上也不阻斷 job 建立；前端會顯示 pending，使用者可之後重試。
-    }
-  }
-
   return NextResponse.json({ jobId: job.id, total: skus.length });
 }
 

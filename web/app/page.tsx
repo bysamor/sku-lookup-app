@@ -59,6 +59,7 @@ export default function HomePage() {
     }
     setLoading(true);
     try {
+      // 建立 job + items
       const res = await fetch("/api/lookup-jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -66,10 +67,19 @@ export default function HomePage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "建立查詢失敗");
+
+      // 立即跳去結果頁，讓用戶看到進度
       router.push(`/jobs/${data.jobId}`);
+
+      // 背景逐一處理每個 SKU（每次 call /run 處理一個）
+      const runNext = async () => {
+        const r = await fetch(`/api/lookup-jobs/${data.jobId}/run`, { method: "POST" });
+        const d = await r.json();
+        if (!d.done) await runNext();
+      };
+      runNext().catch(() => {});
     } catch (e) {
       setError(e instanceof Error ? e.message : "發生未知錯誤");
-    } finally {
       setLoading(false);
     }
   }
