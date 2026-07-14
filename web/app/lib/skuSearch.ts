@@ -94,6 +94,32 @@ async function serpSearch(
   }
 }
 
+async function naverSearch(query: string, limit = 5): Promise<CandidatePage[]> {
+  const params = new URLSearchParams({
+    engine: "naver",
+    query,
+    api_key: SERPAPI_KEY,
+  });
+  try {
+    const res = await fetch(`https://serpapi.com/search.json?${params}`, {
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const results = (data.web_results || data.organic_results || []).slice(0, limit);
+    return results.map((r: Record<string, string>) => ({
+      title: r.title || "",
+      url: r.link || "",
+      snippet: r.snippet,
+      score: 0,
+      matched_sku: false,
+      source_site: extractDomain(r.link || ""),
+    }));
+  } catch {
+    return [];
+  }
+}
+
 // ── Fetch HTML ────────────────────────────────────────────────────
 
 async function fetchHtml(url: string): Promise<string> {
@@ -509,11 +535,15 @@ export async function lookupSku(sku: string): Promise<ProductResult> {
     })),
   ];
 
-  const searchResults = await Promise.all(
-    allQueries.map(({ q, gl, hl }) => serpSearch(q, { gl, hl, limit: 5 }))
-  );
+  // For Korean SKUs also run Naver search in parallel
+  const naverQueries = region === "kr" ? [sku, `${sku} 제품`] : [];
 
-  for (const results of searchResults) {
+  const [googleResults, ...naverResults] = await Promise.all([
+    Promise.all(allQueries.map(({ q, gl, hl }) => serpSearch(q, { gl, hl, limit: 5 }))),
+    ...naverQueries.map((q) => naverSearch(q, 5)),
+  ]);
+
+  for (const results of [...googleResults, ...naverResults]) {
     for (const c of results) {
       if (c.url && !seen.has(c.url) && !isExcluded(c.url)) {
         seen.add(c.url);
@@ -523,16 +553,17 @@ export async function lookupSku(sku: string): Promise<ProductResult> {
   }
 
   if (!candidates.length) {
-    // Fallback: try GS1 to get product name, then re-search with that name
+    // Fallback: GS1 page via Firecrawl → extract product name → re-search
     const gs1 = await lookupGs1(sku);
     const gs1Name = [gs1.brandName, gs1.productName].filter(Boolean).join(" ").trim();
 
     if (gs1Name) {
-      const gs1Queries = [gs1Name, `${gs1Name} product`, `${gs1Name} ingredients`];
-      const gs1Results = await Promise.all(
-        gs1Queries.map((q) => serpSearch(q, { limit: 5 }))
-      );
-      for (const results of gs1Results) {
+      const fallbackResults = await Promise.all([
+        serpSearch(gs1Name, { limit: 5 }),
+        serpSearch(`${gs1Name} product`, { limit: 5 }),
+        region === "kr" ? naverSearch(gs1Name, 5) : Promise.resolve([]),
+      ]);
+      for (const results of fallbackResults) {
         for (const c of results) {
           if (c.url && !seen.has(c.url) && !isExcluded(c.url)) {
             seen.add(c.url);
@@ -541,9 +572,9 @@ export async function lookupSku(sku: string): Promise<ProductResult> {
         }
       }
 
-      // If still no candidates, return GS1 data directly as best-effort
+      // Still nothing → return GS1 data as best-effort
       if (!candidates.length) {
-        const nameZh = gs1Name ? (await translateToZhHk(gs1Name)) || gs1Name : undefined;
+        const nameZh = (await translateToZhHk(gs1Name)) || gs1Name;
         const countryZh = gs1.countryOfSale
           ? (await translateToZhHk(gs1.countryOfSale)) || gs1.countryOfSale
           : undefined;
