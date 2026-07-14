@@ -92,18 +92,19 @@ export default function JobPage() {
     return () => clearInterval(t);
   }, [job, load]);
 
+  const [extracting, setExtracting] = useState<string | null>(null);
+
   async function selectCandidate(itemId: string, candidateId: string) {
-    const res = await fetch(`/api/lookup-items/${itemId}/select-candidate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ candidateId }),
-    });
-    const data = await res.json();
-    load();
-    // worker 在背景重新抓取候選頁內容，5 秒後再自動刷新一次
-    if (data?.reExtracting) {
-      setTimeout(load, 5000);
-      setTimeout(load, 12000);
+    setExtracting(itemId);
+    try {
+      await fetch(`/api/lookup-items/${itemId}/select-candidate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ candidateId }),
+      });
+      await load();
+    } finally {
+      setExtracting(null);
     }
   }
 
@@ -178,6 +179,7 @@ export default function JobPage() {
                 onToggle={() => setExpandedId(expandedId === item.id ? null : item.id)}
                 onSelectCandidate={selectCandidate}
                 onSave={saveItem}
+                isExtracting={extracting === item.id}
               />
             ))}
           </tbody>
@@ -193,12 +195,14 @@ function ItemRow({
   onToggle,
   onSelectCandidate,
   onSave,
+  isExtracting,
 }: {
   item: Item;
   expanded: boolean;
   onToggle: () => void;
   onSelectCandidate: (itemId: string, candidateId: string) => void;
   onSave: (itemId: string, values: Partial<Item>) => void;
+  isExtracting?: boolean;
 }) {
   const [draft, setDraft] = useState<Partial<Item>>(item);
   const [saving, setSaving] = useState(false);
@@ -354,14 +358,15 @@ function ItemRow({
                       <div className="mt-2">
                         {!c.is_selected ? (
                           <button
-                            className="rounded-md border border-gray-300 px-3 py-1 text-xs font-medium hover:bg-gray-100"
+                            className="rounded-md border border-gray-300 px-3 py-1 text-xs font-medium hover:bg-gray-100 disabled:opacity-40"
+                            disabled={isExtracting}
                             onClick={() => onSelectCandidate(item.id, c.id)}
                           >
-                            設為最佳結果
+                            {isExtracting ? "提取中…" : "設為最佳結果"}
                           </button>
                         ) : (
                           <span className="inline-flex items-center rounded-full bg-gray-900 px-2.5 py-0.5 text-xs font-medium text-white">
-                            目前最佳結果
+                            {isExtracting ? "重新提取中…" : "目前最佳結果"}
                           </span>
                         )}
                       </div>
