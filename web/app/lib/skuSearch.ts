@@ -422,6 +422,66 @@ async function mergeMissingFields(
   return primary;
 }
 
+// ── GS1 lookup fallback ───────────────────────────────────────────
+
+interface Gs1Result {
+  productName?: string;
+  brandName?: string;
+  imageUrl?: string;
+  countryOfSale?: string;
+}
+
+async function lookupGs1(sku: string): Promise<Gs1Result> {
+  // Pad to 14-digit GTIN if needed
+  const gtin = sku.replace(/\D/g, "").padStart(14, "0");
+  try {
+    // GS1 Verified by GS1 public API
+    const res = await fetch(
+      `https://www.gs1.org/services/verified-by-gs1/results?gtin=${gtin}&lang=en`,
+      {
+        headers: { Accept: "application/json", "User-Agent": "Mozilla/5.0" },
+        signal: AbortSignal.timeout(15000),
+      }
+    );
+    if (!res.ok) return {};
+    const data = await res.json();
+    const product = data?.product || data?.products?.[0] || data;
+
+    // Extract from typical GS1 response shapes
+    const productName =
+      product?.productDescription?.find((d: { languageCode: string; value: string }) => d.languageCode === "en")?.value ||
+      product?.productDescription?.[0]?.value ||
+      product?.productName ||
+      product?.gpcCategoryDefinition ||
+      null;
+
+    const brandName =
+      product?.brandName?.find((b: { languageCode: string; value: string }) => b.languageCode === "en")?.value ||
+      product?.brandName?.[0]?.value ||
+      product?.brand ||
+      null;
+
+    const imageUrl =
+      product?.productImageUrl?.[0]?.value ||
+      product?.productImageUrl ||
+      null;
+
+    const countryOfSale =
+      product?.countryOfSaleCode?.[0] ||
+      product?.countryOfSale ||
+      null;
+
+    return {
+      productName: productName || undefined,
+      brandName: brandName || undefined,
+      imageUrl: imageUrl || undefined,
+      countryOfSale: countryOfSale || undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
 // ── Main SKU lookup ────────────────────────────────────────────────
 
 export async function lookupSku(sku: string): Promise<ProductResult> {
@@ -473,7 +533,44 @@ export async function lookupSku(sku: string): Promise<ProductResult> {
   }
 
   if (!candidates.length) {
-    return { sku_code: sku, status: "not_found", candidates: [] };
+    // Fallback: try GS1 to get product name, then re-search with that name
+    const gs1 = await lookupGs1(sku);
+    const gs1Name = [gs1.brandName, gs1.productName].filter(Boolean).join(" ").trim();
+
+    if (gs1Name) {
+      const gs1Queries = [gs1Name, `${gs1Name} product`, `${gs1Name} ingredients`];
+      const gs1Results = await Promise.all(
+        gs1Queries.map((q) => serpSearch(q, { limit: 5 }))
+      );
+      for (const results of gs1Results) {
+        for (const c of results) {
+          if (c.url && !seen.has(c.url) && !isExcluded(c.url)) {
+            seen.add(c.url);
+            candidates.push(c);
+          }
+        }
+      }
+
+      // If still no candidates, return GS1 data directly as best-effort
+      if (!candidates.length) {
+        const nameZh = gs1Name ? (await translateToZhHk(gs1Name)) || gs1Name : undefined;
+        const countryZh = gs1.countryOfSale
+          ? (await translateToZhHk(gs1.countryOfSale)) || gs1.countryOfSale
+          : undefined;
+        return {
+          sku_code: sku,
+          product_name: nameZh,
+          product_image: gs1.imageUrl || undefined,
+          country: countryZh,
+          product_url: `https://www.gs1.org/services/verified-by-gs1?gtin=${sku}`,
+          source_site: "gs1.org",
+          status: "needs_review",
+          candidates: [],
+        };
+      }
+    } else {
+      return { sku_code: sku, status: "not_found", candidates: [] };
+    }
   }
 
   // Score candidates in parallel (fetch HTML for each)
