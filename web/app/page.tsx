@@ -43,6 +43,7 @@ export default function HomePage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<JobSummary[] | null>(null);
+  const [deleting, setDeleting] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/lookup-jobs", { cache: "no-store" })
@@ -81,6 +82,17 @@ export default function HomePage() {
     } catch (e) {
       setError(e instanceof Error ? e.message : "發生未知錯誤");
       setLoading(false);
+    }
+  }
+
+  async function deleteJob(jobId: string) {
+    if (!confirm("確定刪除這筆查詢記錄？")) return;
+    setDeleting(jobId);
+    try {
+      await fetch(`/api/lookup-jobs/${jobId}`, { method: "DELETE" });
+      setHistory((prev) => prev?.filter((j) => j.id !== jobId) ?? []);
+    } finally {
+      setDeleting(null);
     }
   }
 
@@ -195,9 +207,18 @@ export default function HomePage() {
                       <StatusBadge status={j.status} />
                     </td>
                     <td className="py-2.5 text-right">
-                      <a href={`/jobs/${j.id}`} className="font-medium text-gray-900 hover:underline">
-                        查看結果 →
-                      </a>
+                      <div className="flex items-center justify-end gap-3">
+                        <a href={`/jobs/${j.id}`} className="font-medium text-gray-900 hover:underline">
+                          查看結果 →
+                        </a>
+                        <button
+                          onClick={() => deleteJob(j.id)}
+                          disabled={deleting === j.id}
+                          className="text-xs text-red-400 hover:text-red-600 disabled:opacity-40"
+                        >
+                          {deleting === j.id ? "刪除中…" : "刪除"}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
